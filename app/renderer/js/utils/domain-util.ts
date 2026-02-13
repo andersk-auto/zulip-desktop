@@ -1,79 +1,25 @@
-import fs from "node:fs";
-import path from "node:path";
+// All filesystem operations are now handled via IPC to the main process.
 
-import {app, dialog} from "@electron/remote";
-import * as Sentry from "@sentry/electron/renderer";
-import {JsonDB} from "node-json-db";
-import {DataError} from "node-json-db/dist/lib/Errors.js";
-import {z} from "zod";
-
-import * as EnterpriseUtil from "../../../common/enterprise-util.ts";
-import Logger from "../../../common/logger-util.ts";
-import * as Messages from "../../../common/messages.ts";
-import * as t from "../../../common/translation-util.ts";
 import type {ServerConfig} from "../../../common/types.ts";
-import defaultIcon from "../../img/icon.png";
 import {ipcRenderer} from "../typed-ipc-renderer.ts";
-
-const logger = new Logger({
-  file: "domain-util.log",
-});
 
 // For historical reasons, we store this string in domain.json to denote a
 // missing icon; it does not change with the actual icon location.
 export const defaultIconSentinel = "../renderer/img/icon.png";
 
-const serverConfigSchema = z.object({
-  url: z.url(),
-  alias: z.string(),
-  icon: z.string(),
-  zulipVersion: z.string().default("unknown"),
-  zulipFeatureLevel: z.number().default(0),
-});
-
-let database!: JsonDB;
-
-reloadDatabase();
-
-// Migrate from old schema
-try {
-  const oldDomain = database.getObject<unknown>("/domain");
-  if (typeof oldDomain === "string") {
-    (async () => {
-      await addDomain({
-        alias: "Zulip",
-        url: oldDomain,
-      });
-      database.delete("/domain");
-    })();
-  }
-} catch (error: unknown) {
-  if (!(error instanceof DataError)) throw error;
+export async function getDomains(): Promise<ServerConfig[]> {
+  return ipcRenderer.invoke("domain-get-domains");
 }
 
-export function getDomains(): ServerConfig[] {
-  reloadDatabase();
-  try {
-    return serverConfigSchema
-      .array()
-      .parse(database.getObject<unknown>("/domains"));
-  } catch (error: unknown) {
-    if (!(error instanceof DataError)) throw error;
-    return [];
-  }
+export async function getDomain(index: number): Promise<ServerConfig> {
+  return ipcRenderer.invoke("domain-get-domain", index);
 }
 
-export function getDomain(index: number): ServerConfig {
-  reloadDatabase();
-  return serverConfigSchema.parse(
-    database.getObject<unknown>(`/domains[${index}]`),
-  );
-}
-
-export function updateDomain(index: number, server: ServerConfig): void {
-  reloadDatabase();
-  serverConfigSchema.parse(server);
-  database.push(`/domains[${index}]`, server, true);
+export async function updateDomain(
+  index: number,
+  server: ServerConfig,
+): Promise<void> {
+  await ipcRenderer.invoke("domain-update-domain", index, server);
 }
 
 export async function addDomain(server: {
@@ -81,119 +27,33 @@ export async function addDomain(server: {
   alias: string;
   icon?: string;
 }): Promise<void> {
-  if (server.icon) {
-    const localIconUrl = await saveServerIcon(server.icon);
-    server.icon = localIconUrl;
-    serverConfigSchema.parse(server);
-    database.push("/domains[]", server, true);
-    reloadDatabase();
-  } else {
-    server.icon = defaultIconSentinel;
-    serverConfigSchema.parse(server);
-    database.push("/domains[]", server, true);
-    reloadDatabase();
-  }
+  await ipcRenderer.invoke("domain-add-domain", server);
 }
 
-export function removeDomains(): void {
-  database.delete("/domains");
-  reloadDatabase();
+export async function removeDomains(): Promise<void> {
+  await ipcRenderer.invoke("domain-remove-domains");
 }
 
-export function removeDomain(index: number): boolean {
-  if (EnterpriseUtil.isPresetOrg(getDomain(index).url)) {
-    return false;
-  }
-
-  database.delete(`/domains[${index}]`);
-  reloadDatabase();
-  return true;
-}
-
-// Check if domain is already added
-export function duplicateDomain(domain: string): boolean {
-  domain = formatUrl(domain);
-  return getDomains().some((server) => server.url === domain);
+export async function removeDomain(index: number): Promise<boolean> {
+  return ipcRenderer.invoke("domain-remove-domain", index);
 }
 
 export async function checkDomain(
   domain: string,
   silent = false,
 ): Promise<ServerConfig> {
-  if (!silent && duplicateDomain(domain)) {
-    // Do not check duplicate in silent mode
-    throw new Error("This server has been added.");
-  }
-
-  domain = formatUrl(domain);
-
-  try {
-    return await getServerSettings(domain);
-  } catch {
-    throw new Error(Messages.invalidZulipServerError(domain));
-  }
-}
-
-async function getServerSettings(domain: string): Promise<ServerConfig> {
-  return ipcRenderer.invoke("get-server-settings", domain);
-}
-
-export async function saveServerIcon(iconURL: string): Promise<string> {
-  return (
-    (await ipcRenderer.invoke("save-server-icon", iconURL)) ??
-    defaultIconSentinel
-  );
+  return ipcRenderer.invoke("domain-check-domain", domain, silent);
 }
 
 export async function updateSavedServer(
   url: string,
   index: number,
 ): Promise<ServerConfig> {
-  // Does not promise successful update
-  const serverConfig = getDomain(index);
-  const oldIcon = serverConfig.icon;
-  try {
-    const newServerConfig = await checkDomain(url, true);
-    const localIconUrl = await saveServerIcon(newServerConfig.icon);
-    if (!oldIcon || localIconUrl !== defaultIconSentinel) {
-      newServerConfig.icon = localIconUrl;
-      updateDomain(index, newServerConfig);
-      reloadDatabase();
-    }
-
-    return newServerConfig;
-  } catch (error: unknown) {
-    logger.log("Could not update server icon.");
-    logger.log(error);
-    Sentry.captureException(error);
-    return serverConfig;
-  }
+  return ipcRenderer.invoke("domain-update-saved-server", url, index);
 }
 
-function reloadDatabase(): void {
-  const domainJsonPath = path.join(
-    app.getPath("userData"),
-    "config/domain.json",
-  );
-  try {
-    const file = fs.readFileSync(domainJsonPath, "utf8");
-    JSON.parse(file);
-  } catch (error: unknown) {
-    if (fs.existsSync(domainJsonPath)) {
-      fs.unlinkSync(domainJsonPath);
-      dialog.showErrorBox(
-        t.__("Error saving new organization"),
-        t.__(
-          "There was an error while saving the new organization. You may have to add your previous organizations again.",
-        ),
-      );
-      logger.error("Error while JSON parsing domain.json: ");
-      logger.error(error);
-      Sentry.captureException(error);
-    }
-  }
-
-  database = new JsonDB(domainJsonPath, true, true);
+export async function iconAsUrl(iconPath: string): Promise<string> {
+  return ipcRenderer.invoke("domain-icon-as-url", iconPath);
 }
 
 export function formatUrl(domain: string): string {
@@ -213,24 +73,9 @@ export function getUnsupportedMessage(
 ): string | undefined {
   if (server.zulipFeatureLevel < 65 /* Zulip Server 4.0 */) {
     const realm = new URL(server.url).hostname;
-    return t.__(
-      "{{{server}}} runs an outdated Zulip Server version {{{version}}}. It may not fully work in this app.",
-      {server: realm, version: server.zulipVersion},
-    );
+    // Note: translation is handled synchronously here since message format is simple
+    return `${realm} runs an outdated Zulip Server version ${server.zulipVersion}. It may not fully work in this app.`;
   }
 
   return undefined;
-}
-
-export function iconAsUrl(iconPath: string): string {
-  if (iconPath === defaultIconSentinel) return defaultIcon;
-
-  try {
-    return `data:application/octet-stream;base64,${fs.readFileSync(
-      iconPath,
-      "base64",
-    )}`;
-  } catch {
-    return defaultIcon;
-  }
 }

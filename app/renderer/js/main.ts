@@ -1,25 +1,13 @@
 import "./zod-config.ts"; // eslint-disable-line import-x/no-unassigned-import
 
 import {clipboard} from "electron/common";
-import path from "node:path";
-import process from "node:process";
-import url from "node:url";
 
-import {Menu, app, dialog, session} from "@electron/remote";
-import * as remote from "@electron/remote";
 import * as Sentry from "@sentry/electron/renderer";
 
 import type {Config} from "../../common/config-util.ts";
-import * as ConfigUtil from "../../common/config-util.ts";
-import * as DNDUtil from "../../common/dnd-util.ts";
 import type {DndSettings} from "../../common/dnd-util.ts";
-import * as EnterpriseUtil from "../../common/enterprise-util.ts";
 import {html} from "../../common/html.ts";
-import * as LinkUtil from "../../common/link-util.ts";
-import Logger from "../../common/logger-util.ts";
 import * as Messages from "../../common/messages.ts";
-import {bundlePath, bundleUrl} from "../../common/paths.ts";
-import * as t from "../../common/translation-util.ts";
 import type {
   NavigationItem,
   ServerConfig,
@@ -33,10 +21,13 @@ import ServerTab from "./components/server-tab.ts";
 import WebView from "./components/webview.ts";
 import {AboutView} from "./pages/about.ts";
 import {PreferenceView} from "./pages/preference/preference.ts";
-import {initializeTray} from "./tray.ts";
+import {bundleUrl, preloadUrl} from "./paths.ts";
 import {ipcRenderer} from "./typed-ipc-renderer.ts";
+import * as ConfigUtil from "./utils/config-ipc.ts";
 import * as DomainUtil from "./utils/domain-util.ts";
+import * as EnterpriseUtil from "./utils/enterprise-ipc.ts";
 import ReconnectUtil from "./utils/reconnect-util.ts";
+import * as t from "./utils/translation-ipc.ts";
 
 Sentry.init({});
 
@@ -52,13 +43,7 @@ type WebviewListener =
   | "show-keyboard-shortcuts"
   | "tab-devtools";
 
-const logger = new Logger({
-  file: "errors.log",
-});
-
 type ServerOrFunctionalTab = ServerTab | FunctionalTab;
-
-const rootWebContents = remote.getCurrentWebContents();
 
 const dingSound = new Audio(
   new URL("resources/sounds/ding.ogg", bundleUrl).href,
@@ -136,9 +121,13 @@ export class ServerManagerView {
   }
 
   async init(): Promise<void> {
-    initializeTray(this);
+    // Initialize tray in main process
+    await ipcRenderer.invoke(
+      "tray-init",
+      ConfigUtil.getConfigItem("trayIcon", true),
+    );
     await this.loadProxy();
-    this.initDefaultSettings();
+    await this.initDefaultSettings();
     this.initSidebar();
     this.removeUaFromDisk();
     if (EnterpriseUtil.hasConfigFile()) {
@@ -162,23 +151,29 @@ export class ServerManagerView {
       ConfigUtil.removeConfigItem("useProxy");
     }
 
-    await session.fromPartition("persist:webviewsession").setProxy(
+    await ipcRenderer.invoke(
+      "set-proxy",
       ConfigUtil.getConfigItem("useSystemProxy", false)
-        ? {mode: "system"}
+        ? {mode: "system" as const}
         : ConfigUtil.getConfigItem("useManualProxy", false)
           ? {
               pacScript: ConfigUtil.getConfigItem("proxyPAC", ""),
               proxyRules: ConfigUtil.getConfigItem("proxyRules", ""),
               proxyBypassRules: ConfigUtil.getConfigItem("proxyBypass", ""),
             }
-          : {mode: "direct"},
+          : {mode: "direct" as const},
     );
   }
 
   // Settings are initialized only when user clicks on General/Server/Network section settings
   // In case, user doesn't visit these section, those values set to be null automatically
   // This will make sure the default settings are correctly set to either true or false
-  initDefaultSettings(): void {
+  async initDefaultSettings(): Promise<void> {
+    const downloadsPath = await ipcRenderer.invoke(
+      "get-app-path",
+      "downloads",
+    );
+
     // Default settings which should be respected
     const settingOptions: Partial<Config> = {
       autoHideMenubar: false,
@@ -203,7 +198,7 @@ export class ServerManagerView {
         showNotification: true,
         silent: false,
       },
-      downloadsPath: `${app.getPath("downloads")}`,
+      downloadsPath,
       quitOnClose: false,
       promptDownload: false,
     };
@@ -262,8 +257,8 @@ export class ServerManagerView {
       await DomainUtil.addDomain(serverConfig);
       return true;
     } catch (error: unknown) {
-      logger.error(error);
-      logger.error(
+      console.error(error);
+      console.error(
         t.__(
           "Could not add {{{domain}}}. Please contact your system administrator.",
           {domain},
@@ -276,12 +271,16 @@ export class ServerManagerView {
   async initPresetOrgs(): Promise<void> {
     // Read preset organizations from global_config.json and queues them
     // for addition to the app's domains
-    const preAddedDomains = DomainUtil.getDomains();
+    const preAddedDomains = await DomainUtil.getDomains();
     this.presetOrgs = EnterpriseUtil.getConfigItem("presetOrganizations", []);
     // Set to true if at least one new domain is added
     const domainPromises = [];
     for (const url of this.presetOrgs) {
-      if (DomainUtil.duplicateDomain(url)) {
+      if (
+        preAddedDomains.some(
+          (d) => d.url === DomainUtil.formatUrl(url),
+        )
+      ) {
         continue;
       }
 
@@ -294,7 +293,7 @@ export class ServerManagerView {
       if (preAddedDomains.length > 0) {
         // User already has servers added
         // ask them before reloading the app
-        const {response} = await dialog.showMessageBox({
+        const {response} = await ipcRenderer.invoke("show-message-box", {
           type: "question",
           buttons: [t.__("Yes"), t.__("Later")],
           defaultId: 0,
@@ -308,9 +307,14 @@ export class ServerManagerView {
       }
     } else if (domainsAdded.length > 0) {
       // Find all orgs that failed
+      const currentDomains = await DomainUtil.getDomains();
       const failedDomains: string[] = [];
       for (const org of this.presetOrgs) {
-        if (DomainUtil.duplicateDomain(org)) {
+        if (
+          currentDomains.some(
+            (d) => d.url === DomainUtil.formatUrl(org),
+          )
+        ) {
           continue;
         }
 
@@ -318,8 +322,8 @@ export class ServerManagerView {
       }
 
       const {title, content} = Messages.enterpriseOrgError(failedDomains);
-      dialog.showErrorBox(title, content);
-      if (DomainUtil.getDomains().length === 0) {
+      await ipcRenderer.invoke("show-error-box", title, content);
+      if (currentDomains.length === 0) {
         // No orgs present, stop showing loading gif
         await this.openSettings("AddServer");
       }
@@ -327,7 +331,7 @@ export class ServerManagerView {
   }
 
   async initTabs(): Promise<void> {
-    const servers = DomainUtil.getDomains();
+    const servers = await DomainUtil.getDomains();
     if (servers.length > 0) {
       for (const [i, server] of servers.entries()) {
         const tab = this.initServer(server, i);
@@ -337,7 +341,7 @@ export class ServerManagerView {
             i,
           );
           tab.setLabel(serverConfig.alias);
-          tab.setIcon(DomainUtil.iconAsUrl(serverConfig.icon));
+          tab.setIcon(serverConfig.icon);
           (await tab.webview).setUnsupportedMessage(
             DomainUtil.getUnsupportedMessage(serverConfig),
           );
@@ -378,7 +382,7 @@ export class ServerManagerView {
     const tabIndex = this.getTabIndex();
     const tab = new ServerTab({
       role: "server",
-      icon: DomainUtil.iconAsUrl(server.icon),
+      icon: server.icon,
       label: server.alias,
       $root: this.$tabsContainer,
       onClick: this.activateLastTab.bind(this, index),
@@ -388,7 +392,6 @@ export class ServerManagerView {
       onHoverOut: this.onHoverOut.bind(this, index),
       webview: WebView.create({
         $root: this.$webviewsContainer,
-        rootWebContents,
         index,
         tabIndex,
         url: server.url,
@@ -415,7 +418,7 @@ export class ServerManagerView {
           await this.openNetworkTroubleshooting(index);
         },
         onTitleChange: this.updateBadge.bind(this),
-        preload: url.pathToFileURL(path.join(bundlePath, "preload.cjs")).href,
+        preload: preloadUrl,
         unsupportedMessage: DomainUtil.getUnsupportedMessage(server),
       }),
     });
@@ -446,13 +449,13 @@ export class ServerManagerView {
   }
 
   initLeftSidebarEvents(): void {
-    this.$dndButton.addEventListener("click", () => {
-      const dndUtil = DNDUtil.toggle();
+    this.$dndButton.addEventListener("click", async () => {
+      const dndResult = await ipcRenderer.invoke("dnd-toggle");
       ipcRenderer.send(
         "forward-message",
         "toggle-dnd",
-        dndUtil.dnd,
-        dndUtil.newSettings,
+        dndResult.dnd,
+        dndResult.newSettings,
       );
     });
     this.$reloadButton.addEventListener("click", async () => {
@@ -815,57 +818,45 @@ export class ServerManagerView {
     const tab = this.tabs[tabIndex];
     if (!(tab instanceof ServerTab)) return false;
     const webview = await tab.webview;
-    const url = webview.getWebContents().getURL();
+    const url = await webview.getUrl();
     return !(url.endsWith("/login/") || webview.loading);
   }
 
   addContextMenu($serverImg: HTMLElement, index: number): void {
     $serverImg.addEventListener("contextmenu", async (event) => {
       event.preventDefault();
-      const template = [
-        {
-          label: t.__("Disconnect organization"),
-          async click() {
-            const {response} = await dialog.showMessageBox({
-              type: "warning",
-              buttons: [t.__("Yes"), t.__("No")],
-              defaultId: 0,
-              message: t.__(
-                "Are you sure you want to disconnect this organization?",
-              ),
-            });
-            if (response === 0) {
-              if (DomainUtil.removeDomain(index)) {
-                ipcRenderer.send("reload-full-app");
-              } else {
-                const {title, content} = Messages.orgRemovalError(
-                  DomainUtil.getDomain(index).url,
-                );
-                dialog.showErrorBox(title, content);
-              }
-            }
-          },
-        },
-        {
-          label: t.__("Notification settings"),
-          enabled: await this.isLoggedIn(index),
-          click: async () => {
-            // Switch to tab whose icon was right-clicked
-            await this.activateTab(index);
-            const tab = this.tabs[index];
-            if (tab instanceof ServerTab)
-              (await tab.webview).showNotificationSettings();
-          },
-        },
-        {
-          label: t.__("Copy Zulip URL"),
-          click() {
-            clipboard.writeText(DomainUtil.getDomain(index).url);
-          },
-        },
-      ];
-      const contextMenu = Menu.buildFromTemplate(template);
-      contextMenu.popup({window: remote.getCurrentWindow()});
+      const result = await ipcRenderer.invoke(
+        "show-sidebar-context-menu",
+        index,
+      );
+      if (result === "disconnect") {
+        const {response} = await ipcRenderer.invoke("show-message-box", {
+          type: "warning",
+          buttons: [t.__("Yes"), t.__("No")],
+          defaultId: 0,
+          message: t.__(
+            "Are you sure you want to disconnect this organization?",
+          ),
+        });
+        if (response === 0) {
+          if (await DomainUtil.removeDomain(index)) {
+            ipcRenderer.send("reload-full-app");
+          } else {
+            const domain = await DomainUtil.getDomain(index);
+            const {title, content} = Messages.orgRemovalError(domain.url);
+            await ipcRenderer.invoke("show-error-box", title, content);
+          }
+        }
+      } else if (result === "notification-settings") {
+        // Switch to tab whose icon was right-clicked
+        await this.activateTab(index);
+        const tab = this.tabs[index];
+        if (tab instanceof ServerTab)
+          (await tab.webview).showNotificationSettings();
+      } else if (result === "copy-url") {
+        const domain = await DomainUtil.getDomain(index);
+        clipboard.writeText(domain.url);
+      }
     });
   }
 
@@ -994,7 +985,10 @@ export class ServerManagerView {
 
     ipcRenderer.on("open-help", async () => {
       // Open help page of current active server
-      await LinkUtil.openBrowser(new URL("https://zulip.com/help/"));
+      await ipcRenderer.invoke(
+        "open-browser",
+        "https://zulip.com/help/",
+      );
     });
 
     ipcRenderer.on("reload-viewer", this.reloadView.bind(this));
@@ -1016,7 +1010,7 @@ export class ServerManagerView {
     ipcRenderer.on("reload-proxy", async (event, showAlert: boolean) => {
       await this.loadProxy();
       if (showAlert) {
-        await dialog.showMessageBox({
+        await ipcRenderer.invoke("show-message-box", {
           message: t.__("Proxy settings saved."),
           buttons: [t.__("OK")],
         });
@@ -1033,7 +1027,7 @@ export class ServerManagerView {
       Promise.all(
         this.tabs.map(async (tab) => {
           if (tab instanceof ServerTab)
-            (await tab.webview).getWebContents().setAudioMuted(state);
+            await (await tab.webview).setAudioMuted(state);
         }),
       ),
     );
@@ -1065,16 +1059,17 @@ export class ServerManagerView {
     ipcRenderer.on(
       "update-realm-name",
       (event, serverURL: string, realmName: string) => {
-        for (const [index, domain] of DomainUtil.getDomains().entries()) {
-          if (domain.url === serverURL) {
-            const tab = this.tabs[index];
-            if (tab instanceof ServerTab) tab.setLabel(realmName);
-            domain.alias = realmName;
-            DomainUtil.updateDomain(index, domain);
-            // Update the realm name also on the Window menu
-            ipcRenderer.send("update-menu", {
-              tabs: this.tabsForIpc,
-              activeTabIndex: this.activeTabIndex,
+        // Domain update is handled in main process; just update the UI
+        for (const [index, tab] of this.tabs.entries()) {
+          if (tab instanceof ServerTab) {
+            void tab.webview.then((webview) => {
+              if (webview.properties.url === serverURL) {
+                tab.setLabel(realmName);
+                ipcRenderer.send("update-menu", {
+                  tabs: this.tabsForIpc,
+                  activeTabIndex: this.activeTabIndex,
+                });
+              }
             });
           }
         }
@@ -1083,19 +1078,17 @@ export class ServerManagerView {
 
     ipcRenderer.on(
       "update-realm-icon",
-      async (event, serverURL: string, iconURL: string) => {
-        await Promise.all(
-          DomainUtil.getDomains().map(async (domain, index) => {
-            if (domain.url === serverURL) {
-              const localIconPath = await DomainUtil.saveServerIcon(iconURL);
-              const tab = this.tabs[index];
-              if (tab instanceof ServerTab)
-                tab.setIcon(DomainUtil.iconAsUrl(localIconPath));
-              domain.icon = localIconPath;
-              DomainUtil.updateDomain(index, domain);
-            }
-          }),
-        );
+      (event, serverURL: string, iconDataUrl: string) => {
+        // Domain update and icon saving handled in main process; just update UI
+        for (const [index, tab] of this.tabs.entries()) {
+          if (tab instanceof ServerTab) {
+            void tab.webview.then((webview) => {
+              if (webview.properties.url === serverURL) {
+                tab.setIcon(iconDataUrl);
+              }
+            });
+          }
+        }
       },
     );
 

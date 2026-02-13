@@ -1,35 +1,45 @@
 import {clipboard} from "electron/common";
 import {
   BrowserWindow,
+  Menu,
   type IpcMainEvent,
   type WebContents,
   app,
   dialog,
   powerMonitor,
   session,
+  shell,
   webContents,
 } from "electron/main";
 import {Buffer} from "node:buffer";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import * as remoteMain from "@electron/remote/main";
 import windowStateKeeper from "electron-window-state";
 
 import * as ConfigUtil from "../common/config-util.ts";
+import * as DNDUtil from "../common/dnd-util.ts";
+import * as EnterpriseUtil from "../common/enterprise-util.ts";
+import {Html, html} from "../common/html.ts";
+import * as LinkUtil from "../common/link-util.ts";
 import {bundlePath, bundleUrl, publicPath} from "../common/paths.ts";
 import * as t from "../common/translation-util.ts";
-import type {RendererMessage} from "../common/typed-ipc.ts";
-import type {MenuProperties} from "../common/types.ts";
+import type {ContextMenuParams, RendererMessage} from "../common/typed-ipc.ts";
+import type {MenuProperties, ServerConfig} from "../common/types.ts";
 
 import {appUpdater, shouldQuitForUpdate} from "./autoupdater.ts";
 import * as BadgeSettings from "./badge-settings.ts";
+import {showContextMenu} from "./context-menu.ts";
+import * as DomainUtil from "./domain-util.ts";
 import handleExternalLink from "./handle-external-link.ts";
 import * as AppMenu from "./menu.ts";
 import {_getServerSettings, _isOnline, _saveServerIcon} from "./request.ts";
 import {sentryInit} from "./sentry.ts";
 import {setAutoLaunch} from "./startup.ts";
+import * as TrayUtil from "./tray.ts";
 import {ipcMain, send} from "./typed-ipc-main.ts";
 
 import "gatemaker/electron-setup.js"; // eslint-disable-line import-x/no-unassigned-import
@@ -88,12 +98,11 @@ function createMainWindow(): BrowserWindow {
     minHeight: 400,
     webPreferences: {
       preload: path.join(bundlePath, "../preload/renderer.cjs"),
-      sandbox: false,
+      sandbox: true,
       webviewTag: true,
     },
     show: false,
   });
-  remoteMain.enable(win.webContents);
 
   win.on("focus", () => {
     send(win.webContents, "focus");
@@ -138,7 +147,7 @@ function createMainWindow(): BrowserWindow {
   //  To destroy tray icon when navigate to a new URL
   win.webContents.on("will-navigate", (event) => {
     if (event) {
-      send(win.webContents, "destroytray");
+      TrayUtil.destroyTray();
     }
   });
 
@@ -172,8 +181,6 @@ function createMainWindow(): BrowserWindow {
   // Used for notifications on Windows
   app.setAppUserModelId("org.zulip.zulip-electron");
 
-  remoteMain.initialize();
-
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) {
@@ -183,6 +190,17 @@ function createMainWindow(): BrowserWindow {
       mainWindow.show();
     }
   });
+
+  // Initialize domain-util with the default icon data URL
+  const defaultIconPath = path.join(publicPath, "img/icon.png");
+  let defaultIconDataUrl = "";
+  try {
+    defaultIconDataUrl = `data:image/png;base64,${fs.readFileSync(defaultIconPath, "base64")}`;
+  } catch {
+    // Icon file not found; leave as empty string
+  }
+
+  DomainUtil.init(app.getPath("userData"), defaultIconDataUrl);
 
   ipcMain.on(
     "permission-callback",
@@ -251,9 +269,498 @@ function createMainWindow(): BrowserWindow {
       );
     } catch {
       // If the parsing or decryption failed in any way,
-      // the correct token hasn’t been copied yet; try
+      // the correct token hasn't been copied yet; try
       // again next time.
       return undefined;
+    }
+  });
+
+  // Config IPC handlers
+  ipcMain.handle(
+    "get-config-item",
+    (_event, key: string) =>
+      ConfigUtil.getConfigItem(key as keyof ConfigUtil.Config, undefined as never),
+  );
+
+  ipcMain.handle(
+    "set-config-item",
+    (_event, key: string, value: unknown, override?: boolean) => {
+      ConfigUtil.setConfigItem(
+        key as keyof ConfigUtil.Config,
+        value as never,
+        override,
+      );
+    },
+  );
+
+  ipcMain.handle(
+    "is-config-item-exists",
+    (_event, key: string) => ConfigUtil.isConfigItemExists(key),
+  );
+
+  ipcMain.handle("remove-config-item", (_event, key: string) => {
+    ConfigUtil.removeConfigItem(key);
+  });
+
+  // Enterprise IPC handlers
+  ipcMain.handle(
+    "enterprise-has-config-file",
+    () => EnterpriseUtil.hasConfigFile(),
+  );
+
+  ipcMain.handle(
+    "enterprise-get-config-item",
+    (_event, key: string, defaultValue: unknown) =>
+      EnterpriseUtil.getConfigItem(
+        key as keyof Parameters<typeof EnterpriseUtil.getConfigItem>[0] extends never ? string : string,
+        defaultValue as never,
+      ),
+  );
+
+  ipcMain.handle(
+    "enterprise-config-item-exists",
+    (_event, key: string) =>
+      EnterpriseUtil.configItemExists(
+        key as Parameters<typeof EnterpriseUtil.configItemExists>[0],
+      ),
+  );
+
+  ipcMain.handle(
+    "enterprise-is-preset-org",
+    (_event, url: string) => EnterpriseUtil.isPresetOrg(url),
+  );
+
+  // Domain IPC handlers (icon fields are resolved to data URLs for the renderer)
+  ipcMain.handle("domain-get-domains", () =>
+    DomainUtil.getDomains().map((d) => ({
+      ...d,
+      icon: DomainUtil.iconAsUrl(d.icon),
+    })),
+  );
+
+  ipcMain.handle("domain-get-domain", (_event, index: number) => {
+    const d = DomainUtil.getDomain(index);
+    return {...d, icon: DomainUtil.iconAsUrl(d.icon)};
+  });
+
+  ipcMain.handle(
+    "domain-update-domain",
+    (_event, index: number, server: ServerConfig) => {
+      DomainUtil.updateDomain(index, server);
+    },
+  );
+
+  ipcMain.handle(
+    "domain-add-domain",
+    async (_event, server: {url: string; alias: string; icon?: string}) => {
+      if (server.icon) {
+        const localIconUrl = await _saveServerIcon(server.icon, ses);
+        server.icon = localIconUrl ?? DomainUtil.defaultIconSentinel;
+      }
+
+      DomainUtil.addDomain(server);
+    },
+  );
+
+  ipcMain.handle("domain-remove-domains", () => {
+    DomainUtil.removeDomains();
+  });
+
+  ipcMain.handle(
+    "domain-remove-domain",
+    (_event, index: number) => DomainUtil.removeDomain(index),
+  );
+
+  ipcMain.handle(
+    "domain-check-domain",
+    async (_event, domain: string, silent?: boolean) => {
+      if (!silent && DomainUtil.duplicateDomain(domain)) {
+        throw new Error("This server has been added.");
+      }
+
+      const formattedDomain = DomainUtil.formatUrl(domain);
+      return _getServerSettings(formattedDomain, ses);
+    },
+  );
+
+  ipcMain.handle(
+    "domain-update-saved-server",
+    async (_event, url: string, index: number) => {
+      const serverConfig = DomainUtil.getDomain(index);
+      const oldIcon = serverConfig.icon;
+      try {
+        // Check domain silently
+        const formattedDomain = DomainUtil.formatUrl(url);
+        const newServerConfig = await _getServerSettings(formattedDomain, ses);
+        const localIconUrl =
+          (await _saveServerIcon(newServerConfig.icon, ses)) ??
+          DomainUtil.defaultIconSentinel;
+        if (!oldIcon || localIconUrl !== DomainUtil.defaultIconSentinel) {
+          newServerConfig.icon = localIconUrl;
+          DomainUtil.updateDomain(index, newServerConfig);
+        }
+
+        // Return with resolved icon data URL for renderer display
+        return {
+          ...newServerConfig,
+          icon: DomainUtil.iconAsUrl(newServerConfig.icon),
+        };
+      } catch {
+        return {...serverConfig, icon: DomainUtil.iconAsUrl(serverConfig.icon)};
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "domain-icon-as-url",
+    (_event, iconPath: string) => DomainUtil.iconAsUrl(iconPath),
+  );
+
+  // Dialog IPC handlers
+  ipcMain.handle(
+    "show-error-box",
+    (_event, title: string, content: string) => {
+      dialog.showErrorBox(title, content);
+    },
+  );
+
+  ipcMain.handle(
+    "show-message-box",
+    async (_event, options: Electron.MessageBoxOptions) =>
+      dialog.showMessageBox(options),
+  );
+
+  ipcMain.handle(
+    "show-open-dialog",
+    async (_event, options: Electron.OpenDialogOptions) =>
+      dialog.showOpenDialog(options),
+  );
+
+  // App info IPC handlers
+  ipcMain.handle("get-app-version", () => app.getVersion());
+
+  ipcMain.handle(
+    "get-app-path",
+    (_event, name: string) =>
+      app.getPath(name as Parameters<typeof app.getPath>[0]),
+  );
+
+  ipcMain.handle("get-platform", () => process.platform);
+
+  // WebContents IPC handlers
+  ipcMain.handle(
+    "wc-set-audio-muted",
+    (_event, webContentsId: number, muted: boolean) => {
+      webContents.fromId(webContentsId)?.setAudioMuted(muted);
+    },
+  );
+
+  ipcMain.handle(
+    "wc-get-url",
+    (_event, webContentsId: number) =>
+      webContents.fromId(webContentsId)?.getURL() ?? "",
+  );
+
+  ipcMain.handle("wc-zoom-in", (_event, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId);
+    if (wc) wc.zoomLevel += 0.5;
+  });
+
+  ipcMain.handle("wc-zoom-out", (_event, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId);
+    if (wc) wc.zoomLevel -= 0.5;
+  });
+
+  ipcMain.handle("wc-zoom-actual-size", (_event, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId);
+    if (wc) wc.zoomLevel = 0;
+  });
+
+  ipcMain.handle("wc-go-back", (_event, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId);
+    if (wc?.navigationHistory.canGoBack()) {
+      wc.navigationHistory.goBack();
+    }
+  });
+
+  ipcMain.handle("wc-go-forward", (_event, webContentsId: number) => {
+    const wc = webContents.fromId(webContentsId);
+    if (wc?.navigationHistory.canGoForward()) {
+      wc.navigationHistory.goForward();
+    }
+  });
+
+  ipcMain.handle(
+    "wc-can-go-back",
+    (_event, webContentsId: number) =>
+      webContents.fromId(webContentsId)?.navigationHistory.canGoBack() ?? false,
+  );
+
+  ipcMain.handle(
+    "wc-can-go-forward",
+    (_event, webContentsId: number) =>
+      webContents.fromId(webContentsId)?.navigationHistory.canGoForward() ??
+      false,
+  );
+
+  ipcMain.handle("wc-reload", (_event, webContentsId: number) => {
+    webContents.fromId(webContentsId)?.reload();
+  });
+
+  ipcMain.handle("wc-open-devtools", (_event, webContentsId: number) => {
+    webContents.fromId(webContentsId)?.openDevTools();
+  });
+
+  ipcMain.handle(
+    "wc-insert-css",
+    async (_event, webContentsId: number, css: string) => {
+      await webContents.fromId(webContentsId)?.insertCSS(css);
+    },
+  );
+
+  ipcMain.handle(
+    "wc-load-url",
+    async (_event, webContentsId: number, url: string) => {
+      await webContents.fromId(webContentsId)?.loadURL(url);
+    },
+  );
+
+  // Session/proxy IPC handlers
+  ipcMain.handle("set-proxy", async (_event, config) => {
+    await ses.setProxy(config);
+  });
+
+  ipcMain.handle(
+    "get-spellchecker-languages",
+    () => ses.availableSpellCheckerLanguages,
+  );
+
+  // Custom CSS IPC handlers
+  ipcMain.handle("read-custom-css", (_event, cssPath: string) => {
+    try {
+      return fs.readFileSync(cssPath, "utf8");
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("custom-css-exists", (_event, cssPath: string) => {
+    try {
+      return fs.existsSync(cssPath);
+    } catch {
+      return false;
+    }
+  });
+
+  // Factory reset
+  ipcMain.handle("factory-reset", async () => {
+    const getAppPath = path.join(app.getPath("appData"), app.name);
+    await fs.promises.rm(getAppPath, {recursive: true, force: true});
+  });
+
+  // Context menu IPC handler
+  ipcMain.handle(
+    "show-context-menu",
+    (_event, webContentsId: number, params: ContextMenuParams) => {
+      showContextMenu(webContentsId, params);
+    },
+  );
+
+  // Sidebar context menu
+  ipcMain.handle("show-sidebar-context-menu", (_event, index: number) => {
+    // Returns a promise that resolves to the action chosen
+    return new Promise<string | undefined>((resolve) => {
+      const template = [
+        {
+          label: t.__("Disconnect organization"),
+          click() {
+            resolve("disconnect");
+          },
+        },
+        {
+          label: t.__("Notification settings"),
+          click() {
+            resolve("notification-settings");
+          },
+        },
+        {
+          label: t.__("Copy Zulip URL"),
+          click() {
+            resolve("copy-url");
+          },
+        },
+      ];
+      const contextMenu = Menu.buildFromTemplate(template);
+      contextMenu.popup({
+        window: mainWindow,
+        callback() {
+          resolve(undefined);
+        },
+      });
+    });
+  });
+
+  // Open browser link
+  ipcMain.handle("open-browser", async (_event, urlString: string) => {
+    const url = new URL(urlString);
+    if (["http:", "https:", "mailto:"].includes(url.protocol)) {
+      await shell.openExternal(url.href);
+    } else {
+      const directory = fs.mkdtempSync(
+        path.join(os.tmpdir(), "zulip-redirect-"),
+      );
+      const file = path.join(directory, "redirect.html");
+      fs.writeFileSync(
+        file,
+        html`
+          <!doctype html>
+          <html>
+            <head>
+              <meta charset="UTF-8" />
+              <meta http-equiv="Refresh" content="0; url=${url.href}" />
+              <title>${t.__("Redirecting")}</title>
+              <style>
+                html {
+                  font-family: menu, "Helvetica Neue", sans-serif;
+                }
+              </style>
+            </head>
+            <body>
+              <p>
+                ${new Html({
+                  html: t.__("Opening {{{link}}}…", {
+                    link: html`<a href="${url.href}">${url.href}</a>`.html,
+                  }),
+                })}
+              </p>
+            </body>
+          </html>
+        `.html,
+      );
+      await shell.openPath(file);
+      setTimeout(() => {
+        fs.unlinkSync(file);
+        fs.rmdirSync(directory);
+      }, 15_000);
+    }
+  });
+
+  // Tray IPC handlers
+  ipcMain.handle("tray-init", (_event, shouldCreate: boolean) => {
+    TrayUtil.initTray(shouldCreate);
+  });
+
+  ipcMain.handle("tray-destroy", () => {
+    TrayUtil.destroyTray();
+  });
+
+  ipcMain.handle("tray-update", (_event, unreadCount: number) => {
+    TrayUtil.updateTray(unreadCount);
+  });
+
+  ipcMain.handle("tray-toggle", () => {
+    TrayUtil.toggleTray();
+  });
+
+  // Sync IPC: get all config at once for renderer cache
+  ipcMain.on("get-all-config", (event) => {
+    const settingsJsonPath = path.join(
+      app.getPath("userData"),
+      "/config/settings.json",
+    );
+    try {
+      const file = fs.readFileSync(settingsJsonPath, "utf8");
+      event.returnValue = JSON.parse(file) as Record<string, unknown>;
+    } catch {
+      event.returnValue = {};
+    }
+  });
+
+  // Sync IPC: get enterprise config for renderer cache
+  ipcMain.on("get-enterprise-config", (event) => {
+    const hasConfig = EnterpriseUtil.hasConfigFile();
+    const settings: Record<string, unknown> = {};
+    if (hasConfig) {
+      const keys = [
+        "presetOrganizations",
+        "autoUpdate",
+        "autoHideMenubar",
+        "trayIcon",
+        "useManualProxy",
+        "useSystemProxy",
+        "showSidebar",
+        "badgeOption",
+        "startAtLogin",
+        "startMinimized",
+        "enableSpellchecker",
+        "showNotification",
+        "betaUpdate",
+        "errorReporting",
+        "customCSS",
+        "silent",
+        "dnd",
+        "quitOnClose",
+        "promptDownload",
+        "flashTaskbarOnMessage",
+        "dockBouncing",
+        "spellcheckerLanguages",
+      ] as const;
+      for (const key of keys) {
+        if (
+          EnterpriseUtil.configItemExists(
+            key as Parameters<typeof EnterpriseUtil.configItemExists>[0],
+          )
+        ) {
+          settings[key] = EnterpriseUtil.getConfigItem(
+            key as Parameters<typeof EnterpriseUtil.getConfigItem>[0],
+            undefined as never,
+          );
+        }
+      }
+    }
+
+    event.returnValue = {hasConfigFile: hasConfig, settings};
+  });
+
+  // Sync IPC: get translation catalog for renderer
+  ipcMain.on("get-translation-catalog", (event) => {
+    const locale = ConfigUtil.getConfigItem("appLanguage", "en") ?? "en";
+    const translationPath = path.join(
+      publicPath,
+      "translations",
+      `${locale}.json`,
+    );
+    try {
+      event.returnValue = JSON.parse(
+        fs.readFileSync(translationPath, "utf8"),
+      ) as Record<string, string>;
+    } catch {
+      event.returnValue = {};
+    }
+  });
+
+  // DND toggle
+  ipcMain.handle("dnd-toggle", () => DNDUtil.toggle());
+
+  // Execute JS to get webContentsId for webview
+  ipcMain.handle(
+    "wc-execute-js-get-webcontents-id",
+    async (_event, selector: string) =>
+      mainWindow.webContents.executeJavaScript(
+        `document.querySelector(${JSON.stringify(selector)})?.getWebContentsId()`,
+      ) as Promise<number>,
+  );
+
+  // Dock operations (macOS)
+  ipcMain.handle("dock-set-badge", (_event, badge: string) => {
+    if (app.dock !== undefined) {
+      app.dock.setBadge(badge);
+    }
+  });
+
+  ipcMain.handle("dock-bounce", () => {
+    if (app.dock !== undefined) {
+      app.dock.bounce();
     }
   });
 
@@ -270,6 +777,29 @@ function createMainWindow(): BrowserWindow {
   }
 
   const page = mainWindow.webContents;
+
+  // Set up context-menu listener for webview contents
+  app.on("web-contents-created", (_event, contents: WebContents) => {
+    contents.on("context-menu", (_event, params) => {
+      // Forward context menu events for webview contents to our handler
+      if (contents.id !== page.id) {
+        showContextMenu(contents.id, {
+          x: params.x,
+          y: params.y,
+          selectionText: params.selectionText,
+          linkURL: params.linkURL,
+          linkText: params.linkText,
+          srcURL: params.srcURL,
+          mediaType: params.mediaType,
+          isEditable: params.isEditable,
+          misspelledWord: params.misspelledWord,
+          dictionarySuggestions: params.dictionarySuggestions,
+          editFlags: {canCopy: params.editFlags.canCopy},
+          menuSourceType: params.menuSourceType,
+        });
+      }
+    });
+  });
 
   page.on("dom-ready", () => {
     if (ConfigUtil.getConfigItem("startMinimized", false)) {
@@ -350,12 +880,6 @@ function createMainWindow(): BrowserWindow {
     },
   );
 
-  // Temporarily remove this event
-  // powerMonitor.on('resume', () => {
-  // 	mainWindow.reload();
-  // 	send(page, 'destroytray');
-  // });
-
   ipcMain.on("focus-app", () => {
     mainWindow.show();
   });
@@ -367,7 +891,7 @@ function createMainWindow(): BrowserWindow {
   // Reload full app not just webview, useful in debugging
   ipcMain.on("reload-full-app", () => {
     mainWindow.reload();
-    send(page, "destroytray");
+    TrayUtil.destroyTray();
   });
 
   ipcMain.on("clear-app-settings", () => {
@@ -393,7 +917,7 @@ function createMainWindow(): BrowserWindow {
   ipcMain.on("update-badge", (_event, messageCount: number) => {
     badgeCount = messageCount;
     BadgeSettings.updateBadge(badgeCount, mainWindow);
-    send(page, "tray", messageCount);
+    TrayUtil.updateTray(messageCount);
   });
 
   ipcMain.on("update-taskbar-icon", (_event, data: string, text: string) => {
@@ -441,14 +965,37 @@ function createMainWindow(): BrowserWindow {
   ipcMain.on(
     "realm-name-changed",
     (_event, serverURL: string, realmName: string) => {
+      // Update domain in main-process storage
+      const domains = DomainUtil.getDomains();
+      for (const [index, domain] of domains.entries()) {
+        if (domain.url === serverURL) {
+          domain.alias = realmName;
+          DomainUtil.updateDomain(index, domain);
+        }
+      }
+
       send(page, "update-realm-name", serverURL, realmName);
     },
   );
 
   ipcMain.on(
     "realm-icon-changed",
-    (_event, serverURL: string, iconURL: string) => {
-      send(page, "update-realm-icon", serverURL, iconURL);
+    async (_event, serverURL: string, iconURL: string) => {
+      // Save icon and update domain in main process
+      const localIconPath = await _saveServerIcon(iconURL, ses);
+      const domains = DomainUtil.getDomains();
+      for (const [index, domain] of domains.entries()) {
+        if (domain.url === serverURL) {
+          domain.icon = localIconPath ?? domain.icon;
+          DomainUtil.updateDomain(index, domain);
+          send(
+            page,
+            "update-realm-icon",
+            serverURL,
+            DomainUtil.iconAsUrl(domain.icon),
+          );
+        }
+      }
     },
   );
 
