@@ -1,8 +1,6 @@
-import process from "node:process";
-
 import {html} from "../../../../common/html.ts";
-import * as LinkUtil from "../../../../common/link-util.ts";
-import * as t from "../../../../common/translation-util.ts";
+import {ipcRenderer} from "../../typed-ipc-renderer.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 type ShortcutsSectionProperties = {
   $root: Element;
@@ -230,6 +228,6 @@ export function initShortcutsSection({
   const externalCreateNewOrgElement =
     $root.querySelector("#open-hotkeys-link")!;
   externalCreateNewOrgElement.addEventListener("click", async () => {
-    await LinkUtil.openBrowser(new URL(link));
+    await ipcRenderer.invoke("open-browser", link);
   });
 }

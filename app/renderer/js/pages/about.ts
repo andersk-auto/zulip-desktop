@@ -1,9 +1,8 @@
-import {app} from "@electron/remote";
-
 import {Html, html} from "../../../common/html.ts";
-import {bundleUrl} from "../../../common/paths.ts";
-import * as t from "../../../common/translation-util.ts";
 import {generateNodeFromHtml} from "../components/base.ts";
+import {bundleUrl} from "../paths.ts";
+import {ipcRenderer} from "../typed-ipc-renderer.ts";
+import * as t from "../utils/translation-ipc.ts";
 
 export class AboutView {
   static async create(): Promise<AboutView> {
@@ -18,7 +17,9 @@ export class AboutView {
     this.$view = document.createElement("div");
     const $shadow = this.$view.attachShadow({mode: "open"});
     $shadow.innerHTML = templateHtml;
-    $shadow.querySelector("#version")!.textContent = `v${app.getVersion()}`;
+    void ipcRenderer.invoke("get-app-version").then((version: string) => {
+      $shadow.querySelector("#version")!.textContent = `v${version}`;
+    });
     const maintenanceInfoHtml = html`
       <div class="maintenance-info">
         <p class="detail maintainer">

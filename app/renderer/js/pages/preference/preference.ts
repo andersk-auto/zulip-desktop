@@ -1,8 +1,7 @@
 import type {IpcRendererEvent} from "electron/renderer";
-import process from "node:process";
 
 import type {DndSettings} from "../../../../common/dnd-util.ts";
-import {bundleUrl} from "../../../../common/paths.ts";
+import {bundleUrl} from "../../paths.ts";
 import type {NavigationItem} from "../../../../common/types.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
 

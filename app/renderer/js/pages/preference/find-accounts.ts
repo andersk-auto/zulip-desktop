@@ -1,7 +1,7 @@
 import {html} from "../../../../common/html.ts";
-import * as LinkUtil from "../../../../common/link-util.ts";
-import * as t from "../../../../common/translation-util.ts";
 import {generateNodeFromHtml} from "../../components/base.ts";
+import {ipcRenderer} from "../../typed-ipc-renderer.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 type FindAccountsProperties = {
   $root: Element;
@@ -16,7 +16,10 @@ async function findAccounts(url: string): Promise<void> {
     url = "https://" + url;
   }
 
-  await LinkUtil.openBrowser(new URL("/accounts/find", url));
+  await ipcRenderer.invoke(
+    "open-browser",
+    new URL("/accounts/find", url).href,
+  );
 }
 
 export function initFindAccounts(properties: FindAccountsProperties): void {

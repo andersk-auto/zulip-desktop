@@ -1,23 +1,14 @@
-import type {OpenDialogOptions} from "electron/renderer";
-import fs from "node:fs";
-import path from "node:path";
-import process from "node:process";
-
-import * as remote from "@electron/remote";
-import {app, dialog, session} from "@electron/remote";
 import Tagify from "@yaireo/tagify";
 import {z} from "zod";
 
 import supportedLocales from "../../../../../public/translations/supported-locales.json";
-import * as ConfigUtil from "../../../../common/config-util.ts";
-import * as EnterpriseUtil from "../../../../common/enterprise-util.ts";
 import {html} from "../../../../common/html.ts";
-import * as t from "../../../../common/translation-util.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
+import * as ConfigUtil from "../../utils/config-ipc.ts";
+import * as EnterpriseUtil from "../../utils/enterprise-ipc.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 import {generateSelectHtml, generateSettingOption} from "./base-section.ts";
-
-const currentBrowserWindow = remote.getCurrentWindow();
 
 type GeneralSectionProperties = {
   $root: Element;
@@ -181,10 +172,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
         <div class="setting-row">
           <div class="setting-description">
             <div class="download-folder-path">
-              ${ConfigUtil.getConfigItem(
-                "downloadsPath",
-                app.getPath("downloads"),
-              )}
+              ${ConfigUtil.getConfigItem("downloadsPath", "")}
             </div>
           </div>
         </div>
@@ -230,7 +218,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
   updatePromptDownloadOption();
   enableErrorReporting();
   setLocale();
-  initSpellChecker();
+  void initSpellChecker();
 
   // Platform specific settings
 
@@ -256,7 +244,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
       clickHandler() {
         const newValue = !ConfigUtil.getConfigItem("trayIcon", true);
         ConfigUtil.setConfigItem("trayIcon", newValue);
-        ipcRenderer.send("forward-message", "toggletray");
+        void ipcRenderer.invoke("tray-toggle");
         updateTrayOption();
       },
     });
@@ -355,12 +343,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
         const newValue = !ConfigUtil.getConfigItem("silent", true);
         ConfigUtil.setConfigItem("silent", newValue);
         updateSilentOption();
-        ipcRenderer.send(
-          "forward-to",
-          currentBrowserWindow.webContents.id,
-          "toggle-silent",
-          newValue,
-        );
+        ipcRenderer.send("forward-message", "toggle-silent", newValue);
       },
     });
   }
@@ -454,14 +437,11 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
   }
 
   async function customCssDialog(): Promise<void> {
-    const showDialogOptions: OpenDialogOptions = {
+    const {filePaths, canceled} = await ipcRenderer.invoke("show-open-dialog", {
       title: t.__("Select file"),
       properties: ["openFile"],
       filters: [{name: t.__("CSS file"), extensions: ["css"]}],
-    };
-
-    const {filePaths, canceled} =
-      await dialog.showOpenDialog(showDialogOptions);
+    });
     if (!canceled) {
       ConfigUtil.setConfigItem("customCSS", filePaths[0]);
       ipcRenderer.send("forward-message", "hard-reload");
@@ -523,13 +503,10 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
   }
 
   async function downloadFolderDialog(): Promise<void> {
-    const showDialogOptions: OpenDialogOptions = {
+    const {filePaths, canceled} = await ipcRenderer.invoke("show-open-dialog", {
       title: t.__("Select Download Location"),
       properties: ["openDirectory"],
-    };
-
-    const {filePaths, canceled} =
-      await dialog.showOpenDialog(showDialogOptions);
+    });
     if (!canceled) {
       ConfigUtil.setConfigItem("downloadsPath", filePaths[0]);
       const downloadFolderPath: HTMLElement = $root.querySelector(
@@ -564,9 +541,8 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
     const clearAppDataMessage = t.__(
       "When the application restarts, it will be as if you have just downloaded the Zulip app.",
     );
-    const getAppPath = path.join(app.getPath("appData"), app.name);
 
-    const {response} = await dialog.showMessageBox({
+    const {response} = await ipcRenderer.invoke("show-message-box", {
       type: "warning",
       buttons: [t.__("Yes"), t.__("No")],
       defaultId: 0,
@@ -574,7 +550,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
       detail: clearAppDataMessage,
     });
     if (response === 0) {
-      await fs.promises.rmdir(getAppPath, {recursive: true});
+      await ipcRenderer.invoke("factory-reset");
       setTimeout(() => {
         ipcRenderer.send("clear-app-settings");
       }, 1000);
@@ -590,7 +566,7 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
     });
   }
 
-  function initSpellChecker(): void {
+  async function initSpellChecker(): Promise<void> {
     // The Electron API is a no-op on macOS and macOS default spellchecker is used.
     if (process.platform === "darwin") {
       const note: HTMLElement = $root.querySelector("#note")!;
@@ -614,9 +590,9 @@ export function initGeneralSection({$root}: GeneralSectionProperties): void {
         </div>
       `.html;
 
-      const availableLanguages = session.fromPartition(
-        "persist:webviewsession",
-      ).availableSpellCheckerLanguages;
+      const availableLanguages: string[] = await ipcRenderer.invoke(
+        "get-spellchecker-languages",
+      );
       let languagePairs = new Map<string, string>();
       for (const l of availableLanguages) {
         const locale = new Intl.Locale(l.replaceAll("_", "-"));

@@ -1,7 +1,8 @@
 import path from "node:path";
 import process from "node:process";
 
-import {BrowserWindow, Menu, Tray, nativeImage} from "electron/main";
+import {nativeImage} from "electron/common";
+import {BrowserWindow, Menu, Tray} from "electron/main";
 
 import * as ConfigUtil from "../common/config-util.ts";
 import {publicPath} from "../common/paths.ts";

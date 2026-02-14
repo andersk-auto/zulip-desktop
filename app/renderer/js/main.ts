@@ -1,13 +1,10 @@
 import "./zod-config.ts"; // eslint-disable-line import-x/no-unassigned-import
 
-import {clipboard} from "electron/common";
-
 import * as Sentry from "@sentry/electron/renderer";
 
 import type {Config} from "../../common/config-util.ts";
 import type {DndSettings} from "../../common/dnd-util.ts";
 import {html} from "../../common/html.ts";
-import * as Messages from "../../common/messages.ts";
 import type {
   NavigationItem,
   ServerConfig,
@@ -26,6 +23,7 @@ import {ipcRenderer} from "./typed-ipc-renderer.ts";
 import * as ConfigUtil from "./utils/config-ipc.ts";
 import * as DomainUtil from "./utils/domain-util.ts";
 import * as EnterpriseUtil from "./utils/enterprise-ipc.ts";
+import * as Messages from "./utils/messages.ts";
 import ReconnectUtil from "./utils/reconnect-util.ts";
 import * as t from "./utils/translation-ipc.ts";
 
@@ -650,9 +648,9 @@ export class ServerManagerView {
     const webview = await tab.webview;
     const reconnectUtil = new ReconnectUtil(webview);
     reconnectUtil.pollInternetAndReload();
-    await webview
-      .getWebContents()
-      .loadURL(new URL("app/renderer/network.html", bundleUrl).href);
+    await webview.loadUrl(
+      new URL("app/renderer/network.html", bundleUrl).href,
+    );
   }
 
   async activateLastTab(index: number): Promise<void> {
@@ -855,7 +853,7 @@ export class ServerManagerView {
           (await tab.webview).showNotificationSettings();
       } else if (result === "copy-url") {
         const domain = await DomainUtil.getDomain(index);
-        clipboard.writeText(domain.url);
+        await ipcRenderer.invoke("clipboard-write-text", domain.url);
       }
     });
   }
@@ -1153,7 +1151,10 @@ export class ServerManagerView {
     });
 
     ipcRenderer.on("copy-zulip-url", async () => {
-      clipboard.writeText(await this.getCurrentActiveServer());
+      await ipcRenderer.invoke(
+        "clipboard-write-text",
+        await this.getCurrentActiveServer(),
+      );
     });
 
     ipcRenderer.on("new-server", async () => {

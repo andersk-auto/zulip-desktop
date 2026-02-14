@@ -1,14 +1,9 @@
 import * as backoff from "backoff";
 
 import {html} from "../../../common/html.ts";
-import Logger from "../../../common/logger-util.ts";
-import * as t from "../../../common/translation-util.ts";
 import type WebView from "../components/webview.ts";
 import {ipcRenderer} from "../typed-ipc-renderer.ts";
-
-const logger = new Logger({
-  file: "domain-util.log",
-});
+import * as t from "./translation-ipc.ts";
 
 export default class ReconnectUtil {
   url: string;
@@ -46,11 +41,11 @@ export default class ReconnectUtil {
 
     if (await this.isOnline()) {
       ipcRenderer.send("forward-message", "reload-viewer");
-      logger.log("You're back online.");
+      console.log("You're back online.");
       return true;
     }
 
-    logger.log(
+    console.log(
       "There is no internet connection, try checking network cables, modem and router.",
     );
     const errorMessageHolder = document.querySelector("#description");

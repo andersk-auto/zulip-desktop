@@ -1,4 +1,5 @@
-import {BrowserWindow, Menu, clipboard, webContents} from "electron/main";
+import {clipboard} from "electron/common";
+import {BrowserWindow, Menu, webContents} from "electron/main";
 import process from "node:process";
 
 import type {MenuItemConstructorOptions} from "electron/main";

@@ -1,4 +1,4 @@
-import {clipboard} from "electron/common";
+import {clipboard, shell} from "electron/common";
 import {
   BrowserWindow,
   Menu,
@@ -8,7 +8,6 @@ import {
   dialog,
   powerMonitor,
   session,
-  shell,
   webContents,
 } from "electron/main";
 import {Buffer} from "node:buffer";
@@ -310,11 +309,10 @@ function createMainWindow(): BrowserWindow {
 
   ipcMain.handle(
     "enterprise-get-config-item",
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     (_event, key: string, defaultValue: unknown) =>
-      EnterpriseUtil.getConfigItem(
-        key as keyof Parameters<typeof EnterpriseUtil.getConfigItem>[0] extends never ? string : string,
-        defaultValue as never,
-      ),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      EnterpriseUtil.getConfigItem(key as any, defaultValue as any),
   );
 
   ipcMain.handle(
@@ -435,6 +433,11 @@ function createMainWindow(): BrowserWindow {
     async (_event, options: Electron.OpenDialogOptions) =>
       dialog.showOpenDialog(options),
   );
+
+  // Clipboard operations
+  ipcMain.handle("clipboard-write-text", (_event, text: string) => {
+    clipboard.writeText(text);
+  });
 
   // App info IPC handlers
   ipcMain.handle("get-app-version", () => app.getVersion());

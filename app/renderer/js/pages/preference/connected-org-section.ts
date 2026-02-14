@@ -1,7 +1,7 @@
 import {html} from "../../../../common/html.ts";
-import * as t from "../../../../common/translation-util.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
 import * as DomainUtil from "../../utils/domain-util.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 import {reloadApp} from "./base-section.ts";
 import {initFindAccounts} from "./find-accounts.ts";
@@ -16,7 +16,6 @@ export function initConnectedOrgSection({
 }: ConnectedOrgSectionProperties): void {
   $root.textContent = "";
 
-  const servers = DomainUtil.getDomains();
   $root.innerHTML = html`
     <div class="settings-pane" id="server-settings-pane">
       <div class="page-title">${t.__("Connected organizations")}</div>
@@ -45,17 +44,21 @@ export function initConnectedOrgSection({
   const noServerText = t.__(
     "All the connected organizations will appear here.",
   );
-  // Show noServerText if no servers are there otherwise hide it
-  $existingServers.textContent = servers.length === 0 ? noServerText : "";
 
-  for (const [i, server] of servers.entries()) {
-    initServerInfoForm({
-      $root: $serverInfoContainer,
-      server,
-      index: i,
-      onChange: reloadApp,
-    });
-  }
+  // Load servers asynchronously and populate the list
+  void DomainUtil.getDomains().then((servers) => {
+    // Show noServerText if no servers are there otherwise hide it
+    $existingServers.textContent = servers.length === 0 ? noServerText : "";
+
+    for (const [i, server] of servers.entries()) {
+      initServerInfoForm({
+        $root: $serverInfoContainer,
+        server,
+        index: i,
+        onChange: reloadApp,
+      });
+    }
+  });
 
   $newOrgButton.addEventListener("click", () => {
     ipcRenderer.send("forward-message", "open-org-tab");

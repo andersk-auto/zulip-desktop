@@ -1,5 +1,5 @@
 import {type Html, html} from "../../../../common/html.ts";
-import * as t from "../../../../common/translation-util.ts";
+import * as t from "../../utils/translation-ipc.ts";
 import {generateNodeFromHtml} from "../../components/base.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
 

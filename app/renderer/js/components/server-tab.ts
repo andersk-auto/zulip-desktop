@@ -1,5 +1,3 @@
-import process from "node:process";
-
 import {type Html, html} from "../../../common/html.ts";
 import {ipcRenderer} from "../typed-ipc-renderer.ts";
 

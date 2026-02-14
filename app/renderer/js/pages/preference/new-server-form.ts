@@ -1,11 +1,8 @@
-import {dialog} from "@electron/remote";
-
 import {html} from "../../../../common/html.ts";
-import * as LinkUtil from "../../../../common/link-util.ts";
-import * as t from "../../../../common/translation-util.ts";
 import {generateNodeFromHtml} from "../../components/base.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
 import * as DomainUtil from "../../utils/domain-util.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 type NewServerFormProperties = {
   $root: Element;
@@ -68,7 +65,7 @@ export function initNewServerForm({
       serverConfig = await DomainUtil.checkDomain($newServerUrl.value.trim());
     } catch (error: unknown) {
       $saveServerButton.textContent = t.__("Connect");
-      await dialog.showMessageBox({
+      await ipcRenderer.invoke("show-message-box", {
         type: "error",
         message:
           error instanceof Error
@@ -98,7 +95,7 @@ export function initNewServerForm({
     "#open-create-org-link",
   )!;
   externalCreateNewOrgElement.addEventListener("click", async () => {
-    await LinkUtil.openBrowser(new URL(link));
+    await ipcRenderer.invoke("open-browser", link);
   });
 
   const networkSettingsId = $root.querySelector(".server-network-option")!;

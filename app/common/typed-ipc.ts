@@ -140,6 +140,9 @@ export type MainCall = {
   // Sidebar context menu
   "show-sidebar-context-menu": (index: number) => string | undefined;
 
+  // Clipboard operations (replaces electron clipboard in renderer)
+  "clipboard-write-text": (text: string) => void;
+
   // Open browser link (replaces link-util fs access)
   "open-browser": (url: string) => void;
 

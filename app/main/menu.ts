@@ -13,6 +13,7 @@ import * as ConfigUtil from "../common/config-util.ts";
 import * as DNDUtil from "../common/dnd-util.ts";
 import * as t from "../common/translation-util.ts";
 import type {RendererMessage} from "../common/typed-ipc.ts";
+import {toggleTray} from "./tray.ts";
 import type {MenuProperties, TabData} from "../common/types.ts";
 
 import {appUpdater} from "./autoupdater.ts";
@@ -221,10 +222,8 @@ function getViewSubmenu(): MenuItemConstructorOptions[] {
     },
     {
       label: t.__("Toggle Tray Icon"),
-      click(_item, focusedWindow) {
-        if (focusedWindow instanceof BrowserWindow) {
-          send(focusedWindow.webContents, "toggletray");
-        }
+      click() {
+        toggleTray();
       },
     },
     {

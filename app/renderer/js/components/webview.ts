@@ -1,26 +1,18 @@
-import type {WebContents} from "electron/main";
-import fs from "node:fs";
-
-import * as remote from "@electron/remote";
-import {app, dialog} from "@electron/remote";
-
-import * as ConfigUtil from "../../../common/config-util.ts";
 import {type Html, html} from "../../../common/html.ts";
-import * as t from "../../../common/translation-util.ts";
 import type {RendererMessage} from "../../../common/typed-ipc.ts";
 import type {TabRole} from "../../../common/types.ts";
 import preloadCss from "../../css/preload.css?raw";
 import {ipcRenderer} from "../typed-ipc-renderer.ts";
+import * as ConfigUtil from "../utils/config-ipc.ts";
 import * as SystemUtil from "../utils/system-util.ts";
+import * as t from "../utils/translation-ipc.ts";
 
 import {generateNodeFromHtml} from "./base.ts";
-import {contextMenu} from "./context-menu.ts";
 
 const shouldSilentWebview = ConfigUtil.getConfigItem("silent", false);
 
 type WebViewProperties = {
   $root: Element;
-  rootWebContents: WebContents;
   index: number;
   tabIndex: number;
   url: string;
@@ -79,22 +71,13 @@ export default class WebView {
     });
 
     // Work around https://github.com/electron/electron/issues/26904
-    function getWebContentsIdFunction(
-      this: undefined,
-      selector: string,
-    ): number {
-      return document
-        .querySelector<Electron.WebviewTag>(selector)!
-        .getWebContentsId();
-    }
-
     const selector = `webview[data-tab-id="${CSS.escape(
       `${properties.tabIndex}`,
     )}"]`;
-    const webContentsId: unknown =
-      await properties.rootWebContents.executeJavaScript(
-        `(${getWebContentsIdFunction.toString()})(${JSON.stringify(selector)})`,
-      );
+    const webContentsId: unknown = await ipcRenderer.invoke(
+      "wc-execute-js-get-webcontents-id",
+      selector,
+    );
     if (typeof webContentsId !== "number") {
       throw new TypeError("Failed to get WebContents ID");
     }
@@ -136,8 +119,12 @@ export default class WebView {
     this.$pane.remove();
   }
 
-  getWebContents(): WebContents {
-    return remote.webContents.fromId(this.webContentsId)!;
+  async getUrl(): Promise<string> {
+    return ipcRenderer.invoke("wc-get-url", this.webContentsId);
+  }
+
+  async setAudioMuted(muted: boolean): Promise<void> {
+    await ipcRenderer.invoke("wc-set-audio-muted", this.webContentsId, muted);
   }
 
   showNotificationSettings(): void {
@@ -159,16 +146,16 @@ export default class WebView {
     this.show();
   }
 
-  zoomIn(): void {
-    this.getWebContents().zoomLevel += 0.5;
+  async zoomIn(): Promise<void> {
+    await ipcRenderer.invoke("wc-zoom-in", this.webContentsId);
   }
 
-  zoomOut(): void {
-    this.getWebContents().zoomLevel -= 0.5;
+  async zoomOut(): Promise<void> {
+    await ipcRenderer.invoke("wc-zoom-out", this.webContentsId);
   }
 
-  zoomActualSize(): void {
-    this.getWebContents().zoomLevel = 0;
+  async zoomActualSize(): Promise<void> {
+    await ipcRenderer.invoke("wc-zoom-actual-size", this.webContentsId);
   }
 
   logOut(): void {
@@ -180,40 +167,45 @@ export default class WebView {
     this.focus();
   }
 
-  openDevTools(): void {
-    this.getWebContents().openDevTools();
+  async openDevTools(): Promise<void> {
+    await ipcRenderer.invoke("wc-open-devtools", this.webContentsId);
   }
 
-  back(): void {
-    if (this.getWebContents().navigationHistory.canGoBack()) {
-      this.getWebContents().navigationHistory.goBack();
+  async back(): Promise<void> {
+    if (await ipcRenderer.invoke("wc-can-go-back", this.webContentsId)) {
+      await ipcRenderer.invoke("wc-go-back", this.webContentsId);
       this.focus();
     }
   }
 
-  canGoBackButton(): void {
+  async canGoBackButton(): Promise<void> {
     const $backButton = document.querySelector(
       "#actions-container #back-action",
     )!;
-    $backButton.classList.toggle(
-      "disable",
-      !this.getWebContents().navigationHistory.canGoBack(),
+    const canGoBack = await ipcRenderer.invoke(
+      "wc-can-go-back",
+      this.webContentsId,
     );
+    $backButton.classList.toggle("disable", !canGoBack);
   }
 
-  forward(): void {
-    if (this.getWebContents().navigationHistory.canGoForward()) {
-      this.getWebContents().navigationHistory.goForward();
+  async forward(): Promise<void> {
+    if (await ipcRenderer.invoke("wc-can-go-forward", this.webContentsId)) {
+      await ipcRenderer.invoke("wc-go-forward", this.webContentsId);
     }
   }
 
-  reload(): void {
+  async reload(): Promise<void> {
     this.hide();
     // Shows the loading indicator till the webview is reloaded
     this.$webviewsContainer.remove("loaded");
     this.loading = true;
     this.properties.switchLoading(true, this.properties.url);
-    this.getWebContents().reload();
+    await ipcRenderer.invoke("wc-reload", this.webContentsId);
+  }
+
+  async loadUrl(url: string): Promise<void> {
+    await ipcRenderer.invoke("wc-load-url", this.webContentsId, url);
   }
 
   setUnsupportedMessage(unsupportedMessage: string | undefined) {
@@ -230,41 +222,44 @@ export default class WebView {
   }
 
   private registerListeners(): void {
-    const webContents = this.getWebContents();
-
     if (shouldSilentWebview) {
-      webContents.setAudioMuted(true);
+      void this.setAudioMuted(true);
     }
 
-    webContents.on("page-title-updated", (_event, title) => {
-      this.badgeCount = this.getBadgeCount(title);
-      this.properties.onTitleChange();
-    });
+    // Use webview DOM events instead of webContents events
+    this.$webview.addEventListener(
+      "page-title-updated",
+      (event: Event & {title?: string}) => {
+        this.badgeCount = this.getBadgeCount(event.title ?? "");
+        this.properties.onTitleChange();
+      },
+    );
 
     this.$webview.addEventListener("did-navigate-in-page", () => {
-      this.canGoBackButton();
+      void this.canGoBackButton();
     });
 
     this.$webview.addEventListener("did-navigate", () => {
-      this.canGoBackButton();
+      void this.canGoBackButton();
     });
 
-    webContents.on("page-favicon-updated", (_event, favicons) => {
-      // This returns a string of favicons URL. If there is a PM counts in unread messages then the URL would be like
-      // https://chat.zulip.org/static/images/favicon/favicon-pms.png
-      if (favicons[0].indexOf("favicon-pms") > 0 && app.dock !== undefined) {
-        // This api is only supported on macOS
-        app.dock.setBadge("●");
-        // Bounce the dock
-        if (ConfigUtil.getConfigItem("dockBouncing", true)) {
-          app.dock.bounce();
+    this.$webview.addEventListener(
+      "page-favicon-updated",
+      (event: Event & {favicons?: string[]}) => {
+        const favicons = event.favicons ?? [];
+        if (
+          favicons.length > 0 &&
+          favicons[0].indexOf("favicon-pms") > 0
+        ) {
+          void ipcRenderer.invoke("dock-set-badge", "●");
+          if (ConfigUtil.getConfigItem("dockBouncing", true)) {
+            void ipcRenderer.invoke("dock-bounce");
+          }
         }
-      }
-    });
+      },
+    );
 
-    webContents.addListener("context-menu", (event, menuParameters) => {
-      contextMenu(webContents, event, menuParameters);
-    });
+    // Context menu is handled in main process via web-contents-created listener
 
     this.$webview.addEventListener("dom-ready", () => {
       this.loading = false;
@@ -272,16 +267,20 @@ export default class WebView {
       this.show();
     });
 
-    webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {
-      const hasConnectivityError =
-        SystemUtil.connectivityError.includes(errorDescription);
-      if (hasConnectivityError) {
-        console.error("error", errorDescription);
-        if (!this.properties.url.includes("network.html")) {
-          this.properties.onNetworkError(this.properties.index);
+    this.$webview.addEventListener(
+      "did-fail-load",
+      (event: Event & {errorDescription?: string}) => {
+        const errorDescription = event.errorDescription ?? "";
+        const hasConnectivityError =
+          SystemUtil.connectivityError.includes(errorDescription);
+        if (hasConnectivityError) {
+          console.error("error", errorDescription);
+          if (!this.properties.url.includes("network.html")) {
+            this.properties.onNetworkError(this.properties.index);
+          }
         }
-      }
-    });
+      },
+    );
 
     this.$webview.addEventListener("did-start-loading", () => {
       this.properties.switchLoading(true, this.properties.url);
@@ -296,10 +295,8 @@ export default class WebView {
       this.$unsupported.hidden = true;
     });
 
-    webContents.on("zoom-changed", (event, zoomDirection) => {
-      if (zoomDirection === "in") this.zoomIn();
-      else if (zoomDirection === "out") this.zoomOut();
-    });
+    // zoom-changed is not available as a webview DOM event;
+    // zoom is handled via menu/keyboard shortcuts through IPC
   }
 
   private getBadgeCount(title: string): number {
@@ -320,23 +317,37 @@ export default class WebView {
     this.focus();
     this.properties.onTitleChange();
     // Injecting preload css in webview to override some css rules
-    (async () => this.getWebContents().insertCSS(preloadCss))();
+    void ipcRenderer.invoke("wc-insert-css", this.webContentsId, preloadCss);
 
     // Get customCSS again from config util to avoid warning user again
     const customCss = ConfigUtil.getConfigItem("customCSS", null);
     this.customCss = customCss;
     if (customCss) {
-      if (!fs.existsSync(customCss)) {
-        this.customCss = null;
-        ConfigUtil.setConfigItem("customCSS", null);
+      void (async () => {
+        const exists = await ipcRenderer.invoke("custom-css-exists", customCss);
+        if (!exists) {
+          this.customCss = null;
+          ConfigUtil.setConfigItem("customCSS", null);
+          await ipcRenderer.invoke(
+            "show-error-box",
+            t.__("Custom CSS file deleted"),
+            t.__("The custom CSS previously set is deleted."),
+          );
+          return;
+        }
 
-        const errorMessage = t.__("The custom CSS previously set is deleted.");
-        dialog.showErrorBox(t.__("Custom CSS file deleted"), errorMessage);
-        return;
-      }
-
-      (async () =>
-        this.getWebContents().insertCSS(fs.readFileSync(customCss, "utf8")))();
+        const cssContent = await ipcRenderer.invoke(
+          "read-custom-css",
+          customCss,
+        );
+        if (cssContent) {
+          await ipcRenderer.invoke(
+            "wc-insert-css",
+            this.webContentsId,
+            cssContent,
+          );
+        }
+      })();
     }
   }
 }

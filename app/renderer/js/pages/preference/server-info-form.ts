@@ -1,12 +1,10 @@
-import {dialog} from "@electron/remote";
-
 import {html} from "../../../../common/html.ts";
-import * as Messages from "../../../../common/messages.ts";
-import * as t from "../../../../common/translation-util.ts";
 import type {ServerConfig} from "../../../../common/types.ts";
 import {generateNodeFromHtml} from "../../components/base.ts";
 import {ipcRenderer} from "../../typed-ipc-renderer.ts";
 import * as DomainUtil from "../../utils/domain-util.ts";
+import * as Messages from "../../utils/messages.ts";
+import * as t from "../../utils/translation-ipc.ts";
 
 type ServerInfoFormProperties = {
   $root: Element;
@@ -21,7 +19,7 @@ export function initServerInfoForm(properties: ServerInfoFormProperties): void {
       <div class="server-info-left">
         <img
           class="server-info-icon"
-          src="${DomainUtil.iconAsUrl(properties.server.icon)}"
+          src="${properties.server.icon}"
         />
         <div class="server-info-row">
           <span class="server-info-alias">${properties.server.alias}</span>
@@ -51,20 +49,19 @@ export function initServerInfoForm(properties: ServerInfoFormProperties): void {
   properties.$root.append($serverInfoForm);
 
   $deleteServerButton.addEventListener("click", async () => {
-    const {response} = await dialog.showMessageBox({
+    const {response} = await ipcRenderer.invoke("show-message-box", {
       type: "warning",
       buttons: [t.__("Yes"), t.__("No")],
       defaultId: 0,
       message: t.__("Are you sure you want to disconnect this organization?"),
     });
     if (response === 0) {
-      if (DomainUtil.removeDomain(properties.index)) {
+      if (await DomainUtil.removeDomain(properties.index)) {
         ipcRenderer.send("reload-full-app");
       } else {
-        const {title, content} = Messages.orgRemovalError(
-          DomainUtil.getDomain(properties.index).url,
-        );
-        dialog.showErrorBox(title, content);
+        const domain = await DomainUtil.getDomain(properties.index);
+        const {title, content} = Messages.orgRemovalError(domain.url);
+        await ipcRenderer.invoke("show-error-box", title, content);
       }
     }
   });
